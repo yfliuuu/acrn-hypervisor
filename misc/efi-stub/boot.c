@@ -42,8 +42,6 @@
 
 EFI_SYSTEM_TABLE *sys_table;
 EFI_BOOT_SERVICES *boot;
-char *cmdline = NULL;
-static UINT64 hv_hpa;
 static struct efi_memmap_info mmap_info;
 
 static EFI_STATUS
@@ -188,8 +186,8 @@ static inline void hv_jump(EFI_PHYSICAL_ADDRESS hv_start,
 	hf(MULTIBOOT_INFO_MAGIC, mbi);
 }
 
-EFI_STATUS construct_mbi(EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_info *mbi,
-		struct multiboot_mmap *mmap)
+EFI_STATUS construct_mbi(struct hv_boot_info *hv_info, struct multiboot_info *mbi,
+		struct multiboot_mmap *mmap, struct multiboot_module *mods)
 {
 	EFI_STATUS err = EFI_SUCCESS;
 	int32_t i, j, mmap_entry_count;
@@ -264,12 +262,22 @@ EFI_STATUS construct_mbi(EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_info *mbi
 	/* switch hv memory region(0x20000000 ~ 0x22000000) to
 	 * available RAM in e820 table
 	 */
-	mmap[j].mm_base_addr = hv_hpa;
+	mmap[j].mm_base_addr = hv_info->hv_hpa;
 	mmap[j].mm_length = CONFIG_HV_RAM_SIZE;
 	mmap[j].mm_type = E820_RAM;
 	j++;
 
-	mbi->mi_cmdline = (UINTN)cmdline;
+	memcpy((char *)mods, (const char *)hv_info->mods, sizeof(struct multiboot_module) * hv_info->mods_count);
+	mbi->mi_mods_addr  = (uint32_t)((EFI_PHYSICAL_ADDRESS)mods);
+	mbi->mi_mods_count = hv_info->mods_count;
+	mbi->mi_flags |= MULTIBOOT_INFO_HAS_MODS;
+	for (i = 0; i < hv_info->mods_count; i++, j++) {
+		mmap[j].mm_base_addr = hv_info->mods[i].mmo_start;
+		mmap[j].mm_length = EFI_SIZE_TO_PAGES(hv_info->mods[i].mmo_end - hv_info->mods[i].mmo_start);
+		mmap[j].mm_type = E820_RAM;
+	}
+
+	mbi->mi_cmdline = (UINTN)hv_info->cmdline;
 	mbi->mi_mmap_addr = (UINTN)mmap;
 	mbi->mi_mmap_length = j*sizeof(struct multiboot_mmap);
 	mbi->mi_flags |= MULTIBOOT_INFO_HAS_MMAP | MULTIBOOT_INFO_HAS_CMDLINE;
@@ -278,12 +286,13 @@ out:
 }
 
 static EFI_STATUS
-run_acrn(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_module *mods_addr, uint32_t mods_count)
+run_acrn(EFI_HANDLE image, struct hv_boot_info *hv_info)
 {
 	EFI_PHYSICAL_ADDRESS addr;
 	EFI_STATUS err;
 	struct multiboot_mmap *mmap;
 	struct multiboot_info *mbi;
+	struct multiboot_module *mods;
 	struct acpi_table_rsdp *rsdp = NULL;
 	int32_t i;
 	EFI_CONFIGURATION_TABLE *config_table;
@@ -299,6 +308,7 @@ run_acrn(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_module 
 
 	mmap = MBOOT_MMAP_PTR(addr);
 	mbi = MBOOT_INFO_PTR(addr);
+	mods = MBOOT_MODS_PTR(addr);
 
 	uefi_boot_loader_name = BOOT_LOADER_NAME_PTR(addr);
 	memcpy(uefi_boot_loader_name, loader_name, BOOT_LOADER_NAME_SIZE);
@@ -339,7 +349,7 @@ run_acrn(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_module 
 		goto out;
 
 	/* construct multiboot info and deliver it to hypervisor */
-	err = construct_mbi(hv_hpa, mbi, mmap);
+	err = construct_mbi(hv_info, mbi, mmap, mods);
 	if (err != EFI_SUCCESS)
 		goto out;
 
@@ -349,12 +359,8 @@ run_acrn(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_module 
 	mbi->mi_flags |= MULTIBOOT_INFO_HAS_LOADER_NAME;
 	mbi->mi_loader_name = (UINT32)uefi_boot_loader_name;
 
-	mbi->mi_mods_addr  = mods_addr;
-	mbi->mi_mods_count = mods_count;
-	mbi->mi_flags |= MULTIBOOT_INFO_HAS_MODS;
-
 	terminate_boot_services(image, mmap_info.map_key);
-	hv_jump(hv_hpa, mbi);
+	hv_jump(hv_info->hv_hpa, mbi);
 
 	/* Not reached on success */
 out:
@@ -419,20 +425,18 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *_table)
 	WCHAR *error_buf;
 	EFI_STATUS err;
 	EFI_LOADED_IMAGE *info;
-	UINTN sec_addr;
-	UINTN sec_size;
-	char *section;
 
 	INTN index;
 	CHAR16 *options = NULL;
 	UINT32 options_size = 0;
 
-	struct multiboot_module *mods_addr = NULL;
-	uint32_t mods_count = 0;
+	struct hv_boot_info hv_info;
 
 	InitializeLib(image, _table);
 	sys_table = _table;
 	boot = sys_table->BootServices;
+
+	(void)memset((void *)&hv_info, 0x0, sizeof(hv_info));
 
 	if (CheckCrc(sys_table->Hdr.HeaderSize, &sys_table->Hdr) != TRUE)
 		return EFI_LOAD_ERROR;
@@ -449,14 +453,9 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *_table)
 	options_size = info->LoadOptionsSize;
 
 	/* convert the options to cmdline */
-	if (options_size > 0)
-		cmdline = ch16_2_ch8(options, StrnLen(options, options_size));
-
-	section = ".hv";
-	err = get_pe_section(info->ImageBase, section, strlen(section), &sec_addr, &sec_size);
-	if (EFI_ERROR(err)) {
-		Print(L"Unable to locate section of ACRNHV %r ", err);
-		goto failed;
+	if (options_size > 0) {
+		hv_info.cmdline = ch16_2_ch8(options, StrnLen(options, options_size));
+		hv_info.cmdline_sz = options_size / 2;
 	}
 
 	err = reserve_unconfigure_high_memory();
@@ -465,31 +464,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *_table)
 		goto failed;
 	}
 
-	/* without relocateion enabled, hypervisor binary need to reside in
-	 * fixed memory address starting from CONFIG_HV_RAM_START, make a call
-	 * to emalloc_fixed_addr for that case. With CONFIG_RELOC enabled,
-	 * hypervisor is able to do relocation, the only requirement is that
-	 * it need to reside in memory below 4GB, call emalloc_reserved_mem()
-	 * instead.
-	 *
-	 * Don't relocate hypervisor binary under 256MB, which could be where
-	 * guest Linux kernel boots from, and other usage, e.g. hvlog buffer
-	 */
-#ifdef CONFIG_RELOC
-	err = emalloc_reserved_aligned(&hv_hpa, CONFIG_HV_RAM_SIZE, 2U * MEM_ADDR_1MB,
-		256U * MEM_ADDR_1MB, MEM_ADDR_4GB);
-#else
-	err = emalloc_fixed_addr(&hv_hpa, CONFIG_HV_RAM_SIZE, CONFIG_HV_RAM_START);
-#endif
-	if (err != EFI_SUCCESS)
+	err = load_images_from_container(info, &hv_info);
+	if (err != EFI_SUCCESS) {
+		Print(L"Unable to load ACRNHV Image %r ", err);
 		goto failed;
+	}
 
-	memcpy((char *)hv_hpa, info->ImageBase + sec_addr, sec_size);
-
-	load_container_image(info, &mods_addr, &mods_count);
-
-	/* load hypervisor and begin to run on it */
-	err = run_acrn(image, hv_hpa, mods_addr, mods_count);
+	err = run_acrn(image, &hv_info);
 	if (err != EFI_SUCCESS)
 		goto failed;
 
