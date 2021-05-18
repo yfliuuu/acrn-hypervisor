@@ -59,6 +59,9 @@
 
 #define UEFI_BOOT_LOADER_NAME "ACRN UEFI loader"
 
+#define ALIGN_UP(addr, align) \
+	(((addr) + (typeof (addr)) (align) - 1) & ~((typeof (addr)) (align) - 1))
+
 /* Read MSR */
 #define CPU_MSR_READ(reg, msr_val_ptr)                      \
 {                                                           \
@@ -172,6 +175,7 @@ struct hv_boot_info {
 	UINT32 cmdline_sz;
 	EFI_PHYSICAL_ADDRESS hv_hpa;
 	UINT32 mods_count;
+	struct acpi_table_rsdp *rsdp;
 	struct multiboot_module mods[MBOOT_MODS_NUMS];
 };
 
