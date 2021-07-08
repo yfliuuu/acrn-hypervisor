@@ -18,6 +18,7 @@
 #include <asm/cpufeatures.h>
 #include <asm/guest/vmexit.h>
 #include <logmsg.h>
+#include <debug/console.h>
 
 /* rip, rsp, ia32_efer and rflags are written to VMCS in start_vcpu */
 static void init_guest_vmx(struct acrn_vcpu *vcpu, uint64_t cr0, uint64_t cr3,
@@ -583,6 +584,24 @@ void load_vmcs(const struct acrn_vcpu *vcpu)
 	}
 }
 
+int is_ptimer_required(const struct acrn_vcpu *vcpu) {
+	return is_nvmx_configured(vcpu->vm)
+		&& (pcpuid_from_vcpu(vcpu) == BSP_CPU_ID);
+}
+
+void set_preemption_timer(uint32_t cycles)
+{
+	uint8_t pt_2_tsc_rate;
+	uint32_t pt_period;
+
+	/* preemption timer */
+	/* SDM vol.3D, appendix A.6, bit 0-4 reports the rate of vmx preemption timer to that
+	 * of TSC. I.e., the vmx pt counts down by 1 every time bit X in TSC changes. */
+	pt_2_tsc_rate = (uint8_t)(msr_read(MSR_IA32_VMX_MISC) & 0xfU);
+	pt_period = cycles >> pt_2_tsc_rate;
+	exec_vmwrite32(VMX_GUEST_TIMER, pt_period);
+}
+
 void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu)
 {
 	uint32_t value32;
@@ -634,6 +653,19 @@ void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu)
 			value32 &= ~VMX_PROCBASED_CTLS2_VAPIC_REGS;
 		}
 		exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS2, value32);
+
+		/* When in nvmx and lapic-pted, HV will need preemption timer to drive its console */
+		if (is_ptimer_required(vcpu)) {
+			value32 = exec_vmread32(VMX_PIN_VM_EXEC_CONTROLS);
+			value32 |= VMX_PINBASED_CTLS_ENABLE_PTMR;
+			exec_vmwrite32(VMX_PIN_VM_EXEC_CONTROLS, value32);
+
+			value32 = exec_vmread32(VMX_EXIT_CONTROLS);
+			value32 |= VMX_EXIT_CTLS_SAVE_PTMR;
+			exec_vmwrite32(VMX_EXIT_CONTROLS, value32);
+
+			set_preemption_timer(console_get_period_in_cycles());
+		}
 
 		update_msr_bitmap_x2apic_passthru(vcpu);
 

@@ -35,6 +35,8 @@ void console_putc(const char *ch);
 char console_getc(void);
 
 void console_setup_timer(void);
+void console_vmx_ptimer_callback(void);
+uint32_t console_get_period_in_cycles(void);
 
 void suspend_console(void);
 void resume_console(void);

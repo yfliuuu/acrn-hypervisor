@@ -45,6 +45,10 @@ void load_vmcs(const struct acrn_vcpu *vcpu);
 void init_host_state(void);
 
 void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu);
+
+int is_ptimer_required(const struct acrn_vcpu *vcpu);
+void set_preemption_timer(uint32_t cycles);
+
 #endif /* ASSEMBLER */
 
 #endif /* VMCS_H_ */

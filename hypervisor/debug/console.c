@@ -172,6 +172,16 @@ void console_setup_timer(void)
 	}
 }
 
+void console_vmx_ptimer_callback(void)
+{
+	console_timer_callback(NULL);
+}
+
+uint32_t console_get_period_in_cycles(void)
+{
+	return TICKS_PER_MS * CONSOLE_KICK_TIMER_TIMEOUT;
+}
+
 void suspend_console(void)
 {
 	del_timer(&console_timer);

@@ -20,6 +20,8 @@
 #include <asm/vtd.h>
 #include <asm/cpuid.h>
 #include <asm/guest/vcpuid.h>
+#include <asm/guest/vmcs.h>
+#include <debug/console.h>
 #include <trace.h>
 #include <asm/rtcm.h>
 
@@ -38,6 +40,7 @@ static int32_t pause_vmexit_handler(__unused struct acrn_vcpu *vcpu);
 static int32_t hlt_vmexit_handler(struct acrn_vcpu *vcpu);
 static int32_t mtf_vmexit_handler(struct acrn_vcpu *vcpu);
 static int32_t loadiwkey_vmexit_handler(struct acrn_vcpu *vcpu);
+static int32_t vmx_preemption_timer_vmexit_handler(struct acrn_vcpu *vcpu);
 
 /* VM Dispatch table for Exit condition handling */
 static const struct vm_exit_dispatch dispatch_table[NR_VMX_EXIT_REASONS] = {
@@ -179,7 +182,7 @@ static const struct vm_exit_dispatch dispatch_table[NR_VMX_EXIT_REASONS] = {
 	[VMX_EXIT_REASON_RDTSCP] = {
 		.handler = unhandled_vmexit_handler},
 	[VMX_EXIT_REASON_VMX_PREEMPTION_TIMER_EXPIRED] = {
-		.handler = unhandled_vmexit_handler},
+		.handler = vmx_preemption_timer_vmexit_handler},
 	[VMX_EXIT_REASON_WBINVD] = {
 		.handler = wbinvd_vmexit_handler},
 	[VMX_EXIT_REASON_XSETBV] = {
@@ -290,6 +293,21 @@ int32_t vmexit_handler(struct acrn_vcpu *vcpu)
 				ret = dispatch->handler(vcpu);
 			}
 		}
+	}
+
+	return ret;
+}
+
+static int32_t vmx_preemption_timer_vmexit_handler(struct acrn_vcpu *vcpu)
+{
+	int32_t ret = 0;
+
+	if (is_ptimer_required(vcpu)) {
+		console_vmx_ptimer_callback();
+		set_preemption_timer(console_get_period_in_cycles());
+		vcpu_retain_rip(vcpu);
+	} else {
+		ret = unhandled_vmexit_handler(vcpu);
 	}
 
 	return ret;
