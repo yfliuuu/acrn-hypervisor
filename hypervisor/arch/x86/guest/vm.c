@@ -39,6 +39,7 @@
 #include <asm/rtcm.h>
 #include <asm/irq.h>
 #include <uart16550.h>
+#define CONFIG_QUIRKS_ENABLED
 #ifdef CONFIG_QUIRKS_ENABLED
 #include <quirks/smbios.h>
 #endif

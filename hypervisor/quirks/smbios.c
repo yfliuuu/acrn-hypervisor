@@ -226,7 +226,9 @@ static int copy_smbios_to_guest(struct acrn_vm *vm)
 
 void try_smbios_passthrough(struct acrn_vm *vm, struct acrn_boot_info *abi)
 {
-    if (is_prelaunched_vm(vm) && is_smbios_pt_configured(vm)) {
+    /* For debugging only */
+    // if (is_prelaunched_vm(vm) && is_smbios_pt_configured(vm)) {
+    if (is_prelaunched_vm(vm)) {
         smbios_table_probe(abi);
         (void)copy_smbios_to_guest(vm);
     }
