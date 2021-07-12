@@ -14,6 +14,8 @@
 #include <asm/guest/vmcs.h>
 #include <asm/guest/nested.h>
 #include <asm/guest/vept.h>
+#include <asm/guest/vmcs.h>
+#include <debug/console.h>
 
 /* Cache the content of MSR_IA32_VMX_BASIC */
 static uint32_t vmx_basic;
@@ -114,9 +116,9 @@ void init_vmx_msrs(struct acrn_vcpu *vcpu)
 		 */
 
 		/* MSR_IA32_VMX_PINBASED_CTLS */
+		/* Hide preemption timer capability */
 		request_bits = VMX_PINBASED_CTLS_IRQ_EXIT
-			| VMX_PINBASED_CTLS_NMI_EXIT
-			| VMX_PINBASED_CTLS_ENABLE_PTMR;
+			| VMX_PINBASED_CTLS_NMI_EXIT;
 		msr_value = adjust_vmx_ctrls(MSR_IA32_VMX_PINBASED_CTLS, request_bits);
 		vcpu_set_guest_msr(vcpu, MSR_IA32_VMX_TRUE_PINBASED_CTLS, msr_value);
 		vcpu_set_guest_msr(vcpu, MSR_IA32_VMX_PINBASED_CTLS, msr_value);
@@ -234,7 +236,7 @@ int32_t read_vmx_msr(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t *val)
 	return err;
 }
 
-#define MAX_SHADOW_VMCS_FIELDS 114U
+#define MAX_SHADOW_VMCS_FIELDS 112U
 /*
  * VMCS fields included in the dual-purpose VMCS: as shadow for L1 and
  * as hardware VMCS for nested guest (L2).
@@ -288,7 +290,6 @@ static const uint32_t vmcs_shadowing_fields[MAX_SHADOW_VMCS_FIELDS] = {
 	VMX_GUEST_PDPTE3_FULL,
 
 	/* 32-bits */
-	VMX_PIN_VM_EXEC_CONTROLS,
 	VMX_PROC_VM_EXEC_CONTROLS,
 	VMX_EXCEPTION_BITMAP,
 	VMX_PF_ERROR_CODE_MASK,
@@ -334,7 +335,6 @@ static const uint32_t vmcs_shadowing_fields[MAX_SHADOW_VMCS_FIELDS] = {
 	VMX_GUEST_ACTIVITY_STATE,
 	VMX_GUEST_SMBASE,
 	VMX_GUEST_IA32_SYSENTER_CS,
-	VMX_GUEST_TIMER,
 	VMX_CR0_GUEST_HOST_MASK,
 	VMX_CR4_GUEST_HOST_MASK,
 	VMX_CR0_READ_SHADOW,
@@ -888,7 +888,8 @@ int32_t vmwrite_vmexit_handler(struct acrn_vcpu *vcpu)
 				}
 
 				if ((vmcs_field == VMX_ENTRY_CONTROLS)
-					|| (vmcs_field == VMX_EXIT_CONTROLS)) {
+					|| (vmcs_field == VMX_EXIT_CONTROLS)
+					|| (vmcs_field == VMX_PIN_VM_EXEC_CONTROLS)) {
 					vcpu->arch.nested.control_field_dirty = true;
 				}
 
@@ -941,8 +942,20 @@ static void adjust_vmcs02_control_fields(struct acrn_vcpu *vcpu)
 
 	exec_vmwrite(VMX_ENTRY_CONTROLS, value64);
 
+	/* Enable preemption timer in vmcs02 */
+	if (is_ptimer_required(vcpu)) {
+		value64 = vmcs12->pin_based_exec_ctrl | VMX_PINBASED_CTLS_ENABLE_PTMR;
+		exec_vmwrite(VMX_PIN_VM_EXEC_CONTROLS, value64);
+		set_preemption_timer(console_get_period_in_cycles());
+	} else {
+		exec_vmwrite(VMX_PIN_VM_EXEC_CONTROLS, vmcs12->pin_based_exec_ctrl);
+	}
+
 	/* Host is alway runing in 64-bit mode */
 	value64 = vmcs12->vm_exit_controls | VMX_EXIT_CTLS_HOST_ADDR64;
+	if (is_ptimer_required(vcpu)) {
+		value64 |= VMX_EXIT_CTLS_SAVE_PTMR;
+	}
 	exec_vmwrite(VMX_EXIT_CONTROLS, value64);
 }
 
@@ -1341,6 +1354,12 @@ int32_t nested_vmexit_handler(struct acrn_vcpu *vcpu)
 
 	if ((exec_vmread(VMX_EXIT_REASON) & 0xFFFFU) == VMX_EXIT_REASON_EPT_VIOLATION) {
 		is_l1_vmexit = handle_l2_ept_violation(vcpu);
+	}
+
+	if ((exec_vmread(VMX_EXIT_REASON) & 0xFFFFU) == VMX_EXIT_REASON_VMX_PREEMPTION_TIMER_EXPIRED) {
+		console_vmx_ptimer_callback();
+		set_preemption_timer(console_get_period_in_cycles());
+		is_l1_vmexit = false;
 	}
 
 	if (is_l1_vmexit) {
